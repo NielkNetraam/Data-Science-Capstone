@@ -1,0 +1,239 @@
+---
+title: "Data Science Capstone Project"
+author: "M. Klein"
+date: "13-1-2017"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+#Load required packages
+#library(stringi)
+#library(NLP)
+#library(tm)
+library(RWeka)
+library(ggplot2)
+#library(grid)
+#library(wordcloud)
+#library(RColorBrewer)
+library(parallel)
+library(doParallel)
+#library(xtable)
+
+library(NLP)
+library(tm)
+library(SnowballC)
+#library(data.table)
+library("reshape2")
+library("wordcloud2")
+library("dplyr")
+
+#Preparing the parallel cluster using the cores
+#cluster <- makeCluster(detectCores() - 1) # convention to leave 1 core for OS
+#registerDoParallel(cluster)
+
+cl <- makeCluster(detectCores())
+invisible(clusterEvalQ(cl, library(tm)))
+invisible(clusterEvalQ(cl, library(RWeka)))
+options(mc.cores=1)
+```
+
+## Task 1 Getting and Cleaning the data    
+
+### Getting the data
+
+```{r}
+if (!file.exists("Coursera-SwiftKey.zip")) {
+    download.file("https://d396qusza40orc.cloudfront.net/dsscapstone/dataset/Coursera-SwiftKey.zip",
+                  "Coursera-SwiftKey.zip", method="curl")
+    unzip("Coursera-SwiftKey.zip")
+}
+```
+
+The data for this project is grouped in a zip file with the following structure:
+
+/final
+
+* /de_DE
+    + /de_DE.blogs.txt
+    + /de_DE.news.txt
+    + /de_DE.twitter.txt
+* /en_US
+    + /en_US.blogs.txt
+    + /en_US.news.txt
+    + /en_US.twitter.txt
+* /fi_FI
+    + /fi_FI.blogs.txt
+    + /fi_FI.news.txt
+    + /fi_FI.twitter.txt
+* /ru_RU
+    + /ru_RU.blogs.txt
+    + /ru_RU.news.txt
+    + /ru_RU.twitter.txt
+
+```{r sample, cache=TRUE}
+set.seed(01-01-2017)
+
+read_and_store_filetype_sample <- function(language, filetype, samplesize) {
+    if (!file.exists(file.path("sample",language))) dir.create(file.path("sample",language))
+    filename <- paste(language, filetype, "txt", sep=".")
+    con_in  <- file(file.path("final", language, filename), "r", encoding = "UTF-8")
+    con_out <- file(file.path("sample", language, filename), "w", encoding = "UTF-8")
+    
+    max <- 0
+    count <- 0
+    size <- 0
+    beat <- 0
+    sample <- 0
+    love <- 0
+    hate <- 0
+    beat <- 0
+    
+    while ( TRUE ) {
+        line = readLines(con_in, n = 1)
+        if ( length(line) == 0 ) break
+        
+        count <- count + 1
+        size <- size + nchar(line)
+        max <- ifelse(nchar(line) > max, nchar(line), max)
+  
+        love <- love + grepl("love", line)
+        hate <- hate + grepl("hate", line)
+        beat <- beat + grepl("^A computer once beat me at chess, but it was no match for me at kickboxing$", line)
+              
+        if (grepl("biostats", line)) print(line)
+        
+        if (rbinom(1, 1, samplesize) == 1) {
+            writeLines(line, con_out)
+            sample <- sample + 1
+        }
+    }
+
+    close(con_in)
+    close(con_out)
+    
+    data.frame(file = filename, size = size, lines = count, sample = sample, maxlenght = max,
+               love=love, hate=hate, beat=beat)
+}
+
+read_and_store_sample <- function(language, samplesize) {
+    rbind(
+        read_and_store_filetype_sample(language, "blogs", samplesize),
+        read_and_store_filetype_sample(language, "news", samplesize),
+        read_and_store_filetype_sample(language, "twitter", samplesize))
+}
+
+read_and_store_sample("en_US", .01)
+
+#Generate Corpus for text analysis
+cname <- file.path("sample", "en_US")
+docs_en_US2 <- Corpus(DirSource(cname))
+```
+
+### Tokenization
+Identifying appropriate tokens such as words, punctuation, and numbers. Writing a function that takes a file as input and returns a tokenized version of it.
+
+```{r tokenization, cache=TRUE}
+docs_en_US2 <- tm_map(docs_en_US2,  stripWhitespace)
+docs_en_US2 <- tm_map(docs_en_US2, removePunctuation)
+docs_en_US2 <- tm_map(docs_en_US2, removeNumbers)
+docs_en_US2 <- tm_map(docs_en_US2, content_transformer(tolower))
+docs_en_US2 <- tm_map(docs_en_US2, removeWords, stopwords("english"))
+docs_en_US2 <- tm_map(docs_en_US2, stemDocument)
+```
+
+### Profanity filtering
+removing profanity and other words you do not want to predict
+
+```{r profanity, cache=TRUE}
+# read list with profanity words, resource: http://www.site-seo-analysis.com/services/profanity/list-of-profanity/
+profanity <- readLines("profanity.csv")    
+    
+docs_en_US2 <- tm_map(docs_en_US2, removeWords, profanity)
+```
+
+## Explanatory Data Analysis
+
+### Exploratory analysis
+perform a thorough exploratory analysis of the data, understanding the distribution of words and relationship between the words in the corpora.
+```{r exploratory, cache=TRUE}
+tdm_1g <- TermDocumentMatrix(docs_en_US2)
+inspect(tdm_1g[1:10,1:3])
+findFreqTerms(tdm_1g, 2000)
+tdm_1g.common = removeSparseTerms(tdm_1g, 0.1)
+findFreqTerms(tdm_1g.common, 2000)
+inspect(tdm_1g.common[1:20,1:3])
+
+tdm_1g.dense <- as.matrix(tdm_1g.common)
+tdm_1g.dense = melt(tdm_1g.dense, value.name = "count")
+
+tdm_1g.blogs <- tdm_1g.dense %>% filter(Docs == "en_US.blogs.txt", count > 3) %>% 
+    mutate (word = Terms, freq = count) %>% select (word, freq) %>% arrange (desc(freq))
+tdm_1g.news <- tdm_1g.dense %>% filter(Docs == "en_US.news.txt", count > 3) %>% 
+    mutate (word = Terms, freq = count) %>% select (word, freq) %>% arrange (desc(freq))
+tdm_1g.twitter <- tdm_1g.dense %>% filter(Docs == "en_US.twitter.txt", count > 3) %>% 
+    mutate (word = Terms, freq = count) %>% select (word, freq) %>% arrange (desc(freq))
+tdm_1g.total <- tdm_1g.dense %>% mutate (word = Terms) %>% group_by(word) %>% 
+    summarize(freq = sum(count)) %>% filter(freq > 3) %>% arrange (desc(freq))
+
+#wordcloud(docs_en_US2, max.words = 40, random.order = FALSE, colors=brewer.pal(8, "Dark2"))
+
+letterCloud(tdm_1g.blogs, word = "B", widgetsize = c(400,200))
+letterCloud(tdm_1g.news, word = "N", widgetsize = c(400,200))
+letterCloud(tdm_1g.twitter, word = "T", widgetsize = c(400,200))
+wordcloud2(as.data.frame(tdm_1g.total), widgetsize = c(400,200))
+
+
+#tdm <- TermDocumentMatrix(docs_en_US2, control=list(tokenize = NGramTokenizer))
+```
+
+### Understand frequencies of words and word pairs
+build figures and tables to understand variation in the frequencies of words and word pairs in the data.
+```{r}
+
+BigramTokenizer <- function(x) NGramTokenizer(x, Weka_control(min = 2, max = 2))
+tdm_2g <- TermDocumentMatrix(docs_en_US2, control = list(tokenize = BigramTokenizer))
+
+findFreqTerms(tdm_2g, lowfreq = 100)
+
+tdm_2g.dense <- as.matrix(removeSparseTerms(tdm_2g, 0.1))
+tdm_2g.dense = melt(tdm_2g.dense, value.name = "count")
+
+tdm_2g.total <- tdm_2g.dense %>% mutate (word = Terms) %>% group_by(word) %>% 
+    summarize(freq = sum(count)) %>% filter(freq > 3) %>% arrange (desc(freq))
+
+wordcloud2(as.data.frame(tdm_2g.total), widgetsize = c(400,200)) 
+
+TrigramTokenizer <- function(x) NGramTokenizer(x, Weka_control(min = 3, max = 3))
+tdm_3g <- TermDocumentMatrix(docs_en_US2, control = list(tokenize = TrigramTokenizer))
+
+findFreqTerms(tdm_3g, lowfreq = 10)
+
+tdm_3g.dense <- as.matrix(removeSparseTerms(tdm_3g, 0.1))
+tdm_3g.dense = melt(tdm_3g.dense, value.name = "count")
+
+tdm_3g.total <- tdm_3g.dense %>% mutate (word = Terms) %>% group_by(word) %>% 
+    summarize(freq = sum(count)) %>% filter(freq > 3) %>% arrange (desc(freq))
+
+wordcloud2(as.data.frame(tdm_3g.total), widgetsize = c(400,200)) 
+```
+Questions to consider
+
+Some words are more frequent than others - what are the distributions of word frequencies?
+What are the frequencies of 2-grams and 3-grams in the dataset?
+How many unique words do you need in a frequency sorted dictionary to cover 50% of all word instances in the language? 90%?
+How do you evaluate how many of the words come from foreign languages?
+Can you think of a way to increase the coverage -- identifying words that may not be in the corpora or using a smaller number of words in the dictionary to cover the same number of phrases?
+
+
+
+```
+
+```{r tokenization, cache=TRUE}
+#en_US.twitter.tokens <- WordTokenizer(en_Us$twitter, control = NULL)
+test.tokens <- WordTokenizer("How are you? Btw thanks for the RT. You gonna be in DC anytime soon? Love to see you. Been way, way too long.", control = NULL)
+en_US.twitter.tokens <- WordTokenizer(head(docs_en_US[["en_US.blogs.txt"]]$content,4), control = NULL)
+
+```
+
+    
